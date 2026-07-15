@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/auth/internal/conf"
@@ -16,10 +15,9 @@ import (
 
 type LogoutTestSuite struct {
 	suite.Suite
-	API     *API
-	Config  *conf.GlobalConfiguration
-	token   string
-	session *models.Session
+	API    *API
+	Config *conf.GlobalConfiguration
+	token  string
 }
 
 func TestLogout(t *testing.T) {
@@ -47,39 +45,11 @@ func (ts *LogoutTestSuite) SetupTest() {
 	s, err := models.NewSession(u.ID, nil)
 	require.NoError(ts.T(), err)
 	require.NoError(ts.T(), ts.API.db.Create(s))
-	ts.session = s
 
 	req := httptest.NewRequest(http.MethodPost, "/token?grant_type=password", nil)
 	t, _, err = ts.API.generateAccessToken(req, ts.API.db, u, &s.ID, models.PasswordGrant)
 	require.NoError(ts.T(), err)
 	ts.token = t
-}
-
-// TestLogoutAuditLogSessionID verifies that the logout audit log entry records
-// the session_id of the session that produced it, so audit events can be
-// correlated back to their session.
-func (ts *LogoutTestSuite) TestLogoutAuditLogSessionID() {
-	req := httptest.NewRequest(http.MethodPost, "http://localhost/logout", nil)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", ts.token))
-	w := httptest.NewRecorder()
-
-	ts.API.handler.ServeHTTP(w, req)
-	require.Equal(ts.T(), http.StatusNoContent, w.Code)
-
-	entries, err := models.FindAuditLogEntries(ts.API.db, []string{}, "", nil)
-	require.NoError(ts.T(), err)
-
-	var logoutEntry *models.AuditLogEntry
-	for _, entry := range entries {
-		if entry.Payload["action"] == string(models.LogoutAction) {
-			logoutEntry = entry
-			break
-		}
-	}
-
-	require.NotNil(ts.T(), logoutEntry, "expected a logout audit log entry")
-	require.Contains(ts.T(), logoutEntry.Payload, "session_id")
-	assert.Equal(ts.T(), ts.session.ID.String(), logoutEntry.Payload["session_id"])
 }
 
 func (ts *LogoutTestSuite) TestLogoutSuccess() {

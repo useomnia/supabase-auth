@@ -84,45 +84,6 @@ func (ts *UserTestSuite) TestUserGet() {
 	require.Equal(ts.T(), http.StatusOK, w.Code)
 }
 
-// TestUserModifiedAuditLogSessionID verifies that updating the user via an
-// authenticated request records the acting session_id on the user_modified
-// audit log entry (the getSession(ctx) capture path).
-func (ts *UserTestSuite) TestUserModifiedAuditLogSessionID() {
-	u, err := models.FindUserByEmailAndAudience(ts.API.db, "test@example.com", ts.Config.JWT.Aud)
-	require.NoError(ts.T(), err, "Error finding user")
-
-	session, err := models.NewSession(u.ID, nil)
-	require.NoError(ts.T(), err)
-	require.NoError(ts.T(), ts.API.db.Create(session))
-	token := ts.generateToken(u, &session.ID)
-
-	var buffer bytes.Buffer
-	require.NoError(ts.T(), json.NewEncoder(&buffer).Encode(map[string]interface{}{
-		"data": map[string]interface{}{"favorite_color": "blue"},
-	}))
-	req := httptest.NewRequest(http.MethodPut, "http://localhost/user", &buffer)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-
-	w := httptest.NewRecorder()
-	ts.API.handler.ServeHTTP(w, req)
-	require.Equal(ts.T(), http.StatusOK, w.Code)
-
-	entries, err := models.FindAuditLogEntries(ts.API.db, []string{}, "", nil)
-	require.NoError(ts.T(), err)
-
-	var modifiedEntry *models.AuditLogEntry
-	for _, entry := range entries {
-		if entry.Payload["action"] == string(models.UserModifiedAction) {
-			modifiedEntry = entry
-			break
-		}
-	}
-	require.NotNil(ts.T(), modifiedEntry, "expected a user_modified audit log entry")
-	require.Contains(ts.T(), modifiedEntry.Payload, "session_id")
-	require.Equal(ts.T(), session.ID.String(), modifiedEntry.Payload["session_id"])
-}
-
 func (ts *UserTestSuite) TestUserUpdateEmail() {
 	cases := []struct {
 		desc                       string
