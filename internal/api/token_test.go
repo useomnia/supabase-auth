@@ -313,6 +313,26 @@ func (ts *TokenTestSuite) TestTokenRefreshTokenGrantSuccess() {
 	w := httptest.NewRecorder()
 	ts.API.handler.ServeHTTP(w, req)
 	assert.Equal(ts.T(), http.StatusOK, w.Code)
+
+	// A refresh writes both a token_refreshed and a token_revoked audit
+	// entry (the grant swap revokes the old token); both should record the
+	// session_id of the session that produced them.
+	entries, err := models.FindAuditLogEntries(ts.API.db, []string{}, "", nil)
+	require.NoError(ts.T(), err)
+
+	wantSessionID := ts.RefreshToken.SessionId.String()
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		action, _ := entry.Payload["action"].(string)
+		switch action {
+		case string(models.TokenRefreshedAction), string(models.TokenRevokedAction):
+			seen[action] = true
+			require.Contains(ts.T(), entry.Payload, "session_id", "%s entry should carry session_id", action)
+			assert.Equal(ts.T(), wantSessionID, entry.Payload["session_id"], "%s session_id", action)
+		}
+	}
+	assert.True(ts.T(), seen[string(models.TokenRefreshedAction)], "expected a token_refreshed audit entry")
+	assert.True(ts.T(), seen[string(models.TokenRevokedAction)], "expected a token_revoked audit entry")
 }
 
 func (ts *TokenTestSuite) TestTokenPasswordGrantFailure() {
