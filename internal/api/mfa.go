@@ -179,7 +179,7 @@ func (a *API) enrollPhoneFactor(w http.ResponseWriter, r *http.Request, params *
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.EnrollFactorAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":   factor.ID,
 			"factor_type": factor.FactorType,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		return nil
@@ -214,7 +214,7 @@ func (a *API) enrollWebAuthnFactor(w http.ResponseWriter, r *http.Request, param
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.EnrollFactorAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":   factor.ID,
 			"factor_type": factor.FactorType,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		return nil
@@ -282,7 +282,7 @@ func (a *API) enrollTOTPFactor(w http.ResponseWriter, r *http.Request, params *E
 
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.EnrollFactorAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id": factor.ID,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		return nil
@@ -411,7 +411,7 @@ func (a *API) challengePhoneFactor(w http.ResponseWriter, r *http.Request) error
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.CreateChallengeAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":     factor.ID,
 			"factor_status": factor.Status,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		return nil
@@ -443,7 +443,7 @@ func (a *API) challengeTOTPFactor(w http.ResponseWriter, r *http.Request) error 
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.CreateChallengeAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":     factor.ID,
 			"factor_status": factor.Status,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		return nil
@@ -664,7 +664,7 @@ func (a *API) verifyTOTPFactor(w http.ResponseWriter, r *http.Request, params *V
 			"factor_id":    factor.ID,
 			"challenge_id": challenge.ID,
 			"factor_type":  factor.FactorType,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		if terr = challenge.Verify(tx); terr != nil {
@@ -816,7 +816,7 @@ func (a *API) verifyPhoneFactor(w http.ResponseWriter, r *http.Request, params *
 			"factor_id":    factor.ID,
 			"challenge_id": challenge.ID,
 			"factor_type":  factor.FactorType,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		if terr = challenge.Verify(tx); terr != nil {
@@ -932,7 +932,7 @@ func (a *API) verifyWebAuthnFactor(w http.ResponseWriter, r *http.Request, param
 			"factor_id":    factor.ID,
 			"challenge_id": challenge.ID,
 			"factor_type":  factor.FactorType,
-		}); terr != nil {
+		}, models.WithSession(getSession(r.Context()))); terr != nil {
 			return terr
 		}
 		// Challenge verification not needed as the challenge is destroyed on use
@@ -1049,8 +1049,7 @@ func (a *API) UnenrollFactor(w http.ResponseWriter, r *http.Request) error {
 		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UnenrollFactorAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":     factor.ID,
 			"factor_status": factor.Status,
-			"session_id":    session.ID,
-		}); terr != nil {
+		}, models.WithSession(session)); terr != nil {
 			return terr
 		}
 		if terr = factor.DowngradeSessionsToAAL1(tx); terr != nil {
