@@ -154,7 +154,9 @@ func NewAuditLogEntry(config conf.AuditLogConfiguration, r *http.Request, tx *st
 	}
 
 	for _, opt := range opts {
-		opt(payload)
+		if opt != nil {
+			opt(payload)
+		}
 	}
 
 	observability.LogEntrySetFields(r, logrus.Fields{
