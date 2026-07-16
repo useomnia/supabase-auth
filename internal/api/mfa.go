@@ -1049,6 +1049,9 @@ func (a *API) UnenrollFactor(w http.ResponseWriter, r *http.Request) error {
 		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UnenrollFactorAction, utilities.GetIPAddress(r), map[string]interface{}{
 			"factor_id":     factor.ID,
 			"factor_status": factor.Status,
+			// Kept for backward compatibility; session_id is also added as a
+			// top-level payload key via WithSession below.
+			"session_id": session.ID,
 		}, models.WithSession(session)); terr != nil {
 			return terr
 		}
