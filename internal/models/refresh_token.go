@@ -68,12 +68,12 @@ func GrantRefreshTokenSwap(config conf.AuditLogConfiguration, r *http.Request, t
 	var newToken *RefreshToken
 	err := tx.Transaction(func(rtx *storage.Connection) error {
 		var terr error
-		if terr = NewAuditLogEntry(config, r, rtx, user, TokenRevokedAction, "", nil, WithSessionID(token.SessionId)); terr != nil {
+		if terr = NewAuditLogEntry(config, r, tx, user, TokenRevokedAction, "", nil, WithSessionID(token.SessionId)); terr != nil {
 			return errors.Wrap(terr, "error creating audit log entry")
 		}
 
 		token.Revoked = true
-		if terr = rtx.UpdateOnly(token, "revoked"); terr != nil {
+		if terr = tx.UpdateOnly(token, "revoked"); terr != nil {
 			return terr
 		}
 
