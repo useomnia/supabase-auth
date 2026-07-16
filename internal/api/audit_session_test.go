@@ -139,6 +139,25 @@ func (ts *AuditSessionTestSuite) TestMFAEnroll() {
 	ts.requireAuditSessionID(models.EnrollFactorAction, session.ID)
 }
 
+// TestLoginPassword covers a login event, whose session is created during the
+// request (inside token issuance) and recorded on the audit entry written
+// afterwards. The created session's ID is read back from the response header.
+func (ts *AuditSessionTestSuite) TestLoginPassword() {
+	email := "login-pw@example.com"
+	ts.newUserWithSession(email) // creates a confirmed user with password "password"
+
+	w := ts.do(http.MethodPost, "http://localhost/token?grant_type=password", "", map[string]interface{}{
+		"email":    email,
+		"password": "password",
+	})
+	require.Equal(ts.T(), http.StatusOK, w.Code)
+
+	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
+	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
+
+	ts.requireAuditSessionID(models.LoginAction, sessionID)
+}
+
 // TestTokenRefreshAndRevoke covers the two events that don't source the session
 // from the request context: token_refreshed (from the local session) and
 // token_revoked (from the swapped refresh token's SessionId).

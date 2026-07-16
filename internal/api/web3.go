@@ -154,6 +154,11 @@ func (a *API) web3GrantSolana(ctx context.Context, w http.ResponseWriter, r *htt
 		}
 		createdUser = decision == models.CreateAccount
 
+		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
+		if terr != nil {
+			return terr
+		}
+
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
 			"provider": providerType,
 			"chain":    params.Chain,
@@ -161,12 +166,7 @@ func (a *API) web3GrantSolana(ctx context.Context, w http.ResponseWriter, r *htt
 			"address":  parsedMessage.Address,
 			"domain":   parsedMessage.Domain,
 			"uri":      parsedMessage.URI,
-		}); terr != nil {
-			return terr
-		}
-
-		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
-		if terr != nil {
+		}, models.WithSessionID(&token.SessionID)); terr != nil {
 			return terr
 		}
 
@@ -300,6 +300,11 @@ func (a *API) web3GrantEthereum(ctx context.Context, w http.ResponseWriter, r *h
 		}
 		createdUser = decision == models.CreateAccount
 
+		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
+		if terr != nil {
+			return terr
+		}
+
 		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
 			"provider": providerType,
 			"chain":    params.Chain,
@@ -307,12 +312,7 @@ func (a *API) web3GrantEthereum(ctx context.Context, w http.ResponseWriter, r *h
 			"address":  parsedMessage.Address,
 			"domain":   parsedMessage.Domain,
 			"uri":      parsedMessage.URI,
-		}); terr != nil {
-			return terr
-		}
-
-		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
-		if terr != nil {
+		}, models.WithSessionID(&token.SessionID)); terr != nil {
 			return terr
 		}
 

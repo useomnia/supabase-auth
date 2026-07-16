@@ -113,6 +113,12 @@ type AccessTokenResponse struct {
 	ProviderRefreshToken string       `json:"provider_refresh_token,omitempty"`
 	WeakPassword         interface{}  `json:"weak_password,omitempty"`
 	IDToken              string       `json:"id_token,omitempty"` // OIDC ID Token
+
+	// SessionID is the ID of the session created/used for this response. It is
+	// not serialized to clients (the value is already surfaced via the
+	// sb-auth-session-id response header); it exists so callers can record the
+	// session on audit log entries written after the token is issued.
+	SessionID uuid.UUID `json:"-"`
 }
 
 // GenerateAccessTokenParams contains parameters for generating access tokens
@@ -950,6 +956,7 @@ func (s *Service) IssueRefreshToken(r *http.Request, responseHeaders http.Header
 		ExpiresAt:    expiresAt,
 		RefreshToken: refreshToken,
 		User:         user,
+		SessionID:    sessionID,
 	}, nil
 }
 

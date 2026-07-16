@@ -187,13 +187,14 @@ func (a *API) ResourceOwnerPasswordGrant(ctx context.Context, w http.ResponseWri
 	var token *AccessTokenResponse
 	err = db.Transaction(func(tx *storage.Connection) error {
 		var terr error
-		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
-			"provider": provider,
-		}); terr != nil {
-			return terr
-		}
 		token, terr = a.tokenService.IssueRefreshToken(r, w.Header(), tx, user, models.PasswordGrant, grantParams)
 		if terr != nil {
+			return terr
+		}
+
+		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
+			"provider": provider,
+		}, models.WithSessionID(&token.SessionID)); terr != nil {
 			return terr
 		}
 
@@ -257,14 +258,14 @@ func (a *API) PKCE(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return err
 		}
-		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
-			"provider_type": flowState.ProviderType,
-		}); terr != nil {
-			return terr
-		}
 		token, terr = a.tokenService.IssueRefreshToken(r, w.Header(), tx, user, authMethod, grantParams)
 		if terr != nil {
 			// error type is already handled in issueRefreshToken
+			return terr
+		}
+		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
+			"provider_type": flowState.ProviderType,
+		}, models.WithSessionID(&token.SessionID)); terr != nil {
 			return terr
 		}
 		token.ProviderAccessToken = flowState.ProviderAccessToken

@@ -183,14 +183,14 @@ func (a *API) PasskeyAuthenticationVerify(w http.ResponseWriter, r *http.Request
 			return terr
 		}
 
-		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, utilities.GetIPAddress(r), map[string]any{
-			"passkey_id": passkeyCredential.ID,
-		}); terr != nil {
+		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.PasskeyLogin, grantParams)
+		if terr != nil {
 			return terr
 		}
 
-		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.PasskeyLogin, grantParams)
-		if terr != nil {
+		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, utilities.GetIPAddress(r), map[string]any{
+			"passkey_id": passkeyCredential.ID,
+		}, models.WithSessionID(&token.SessionID)); terr != nil {
 			return terr
 		}
 
