@@ -307,14 +307,14 @@ func (a *API) Signup(w http.ResponseWriter, r *http.Request) error {
 		var token *AccessTokenResponse
 		err = db.Transaction(func(tx *storage.Connection) error {
 			var terr error
-			if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
-				"provider": params.Provider,
-			}); terr != nil {
+			token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.PasswordGrant, grantParams)
+			if terr != nil {
 				return terr
 			}
-			token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.PasswordGrant, grantParams)
 
-			if terr != nil {
+			if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
+				"provider": params.Provider,
+			}, models.WithSessionID(&token.SessionID)); terr != nil {
 				return terr
 			}
 			return nil
