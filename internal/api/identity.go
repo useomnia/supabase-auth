@@ -57,7 +57,7 @@ func (a *API) DeleteIdentity(w http.ResponseWriter, r *http.Request) error {
 			"identity_id": identityToBeDeleted.ID,
 			"provider":    identityToBeDeleted.Provider,
 			"provider_id": identityToBeDeleted.ProviderID,
-		}); terr != nil {
+		}, models.WithSession(getSession(ctx))); terr != nil {
 			return apierrors.NewInternalServerError("Error recording audit log entry").WithInternalError(terr)
 		}
 		if terr := tx.Destroy(identityToBeDeleted); terr != nil {

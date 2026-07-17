@@ -100,7 +100,35 @@ func (AuditLogEntry) TableName() string {
 	return tableName
 }
 
-func NewAuditLogEntry(config conf.AuditLogConfiguration, r *http.Request, tx *storage.Connection, actor *User, action AuditAction, ipAddress string, traits map[string]interface{}) error {
+// AuditLogEntryOption mutates the audit log entry payload before it is
+// persisted. Options are applied after the base payload (and any traits) have
+// been assembled, so they can add or override top-level payload keys.
+type AuditLogEntryOption func(payload map[string]interface{})
+
+// WithSession adds the session's ID to the audit log entry payload as a
+// top-level "session_id" key. It is a no-op when the session is nil, so
+// callers can pass the result of getSession(ctx) directly without guarding:
+// events that have no associated session simply omit the key.
+func WithSession(session *Session) AuditLogEntryOption {
+	return func(payload map[string]interface{}) {
+		if session != nil {
+			payload["session_id"] = session.ID
+		}
+	}
+}
+
+// WithSessionID adds the given session ID to the audit log entry payload as a
+// top-level "session_id" key. It is a no-op when the pointer is nil (e.g. a
+// legacy refresh token that predates sessions), omitting the key.
+func WithSessionID(sessionID *uuid.UUID) AuditLogEntryOption {
+	return func(payload map[string]interface{}) {
+		if sessionID != nil {
+			payload["session_id"] = *sessionID
+		}
+	}
+}
+
+func NewAuditLogEntry(config conf.AuditLogConfiguration, r *http.Request, tx *storage.Connection, actor *User, action AuditAction, ipAddress string, traits map[string]interface{}, opts ...AuditLogEntryOption) error {
 	id := uuid.Must(uuid.NewV4())
 
 	username := actor.GetEmail()
@@ -123,6 +151,12 @@ func NewAuditLogEntry(config conf.AuditLogConfiguration, r *http.Request, tx *st
 
 	if traits != nil {
 		payload["traits"] = traits
+	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(payload)
+		}
 	}
 
 	observability.LogEntrySetFields(r, logrus.Fields{
