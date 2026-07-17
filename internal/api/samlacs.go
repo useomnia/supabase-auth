@@ -324,7 +324,8 @@ func (a *API) handleSamlAcs(w http.ResponseWriter, r *http.Request) error {
 
 		// accounts potentially created via SAML can contain non-unique email addresses in the auth.users table
 		var decision models.AccountLinkingDecision
-		if decision, user, terr = a.createAccountFromExternalIdentity(tx, r, &userProvidedData, providerType, false); terr != nil {
+		var pending *deferredAudit
+		if decision, user, pending, terr = a.createAccountFromExternalIdentity(tx, r, &userProvidedData, providerType, false); terr != nil {
 			return terr
 		}
 		createdUser = decision == models.CreateAccount
@@ -350,6 +351,9 @@ func (a *API) handleSamlAcs(w http.ResponseWriter, r *http.Request) error {
 			return apierrors.NewInternalServerError("Unable to issue refresh token from SAML Assertion").WithInternalError(terr)
 		}
 
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
+			return terr
+		}
 		return nil
 	}); err != nil {
 		return err
