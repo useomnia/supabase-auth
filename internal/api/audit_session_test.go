@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/supabase/auth/internal/conf"
+	"github.com/supabase/auth/internal/crypto"
 	"github.com/supabase/auth/internal/models"
 )
 
@@ -155,6 +156,62 @@ func (ts *AuditSessionTestSuite) TestLoginPassword() {
 	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
 	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
 
+	ts.requireAuditSessionID(models.LoginAction, sessionID)
+}
+
+// TestSignupVerify covers user_signedup emitted when a signup is confirmed via
+// /verify and a session is issued in the same request (the deferred-audit path).
+func (ts *AuditSessionTestSuite) TestSignupVerify() {
+	email := "signup-verify@example.com"
+	const rawToken = "778899"
+	u, err := models.NewUser("", email, "password", ts.Config.JWT.Aud, nil)
+	require.NoError(ts.T(), err)
+	now := time.Now()
+	u.ConfirmationToken = crypto.GenerateTokenHash(email, rawToken)
+	u.ConfirmationSentAt = &now
+	require.NoError(ts.T(), ts.API.db.Create(u))
+	i, err := models.NewIdentity(u, "email", map[string]interface{}{
+		"sub": u.ID.String(), "email": email, "email_verified": false,
+	})
+	require.NoError(ts.T(), err)
+	require.NoError(ts.T(), ts.API.db.Create(i))
+	require.NoError(ts.T(), models.CreateOneTimeToken(ts.API.db, u.ID, u.GetEmail(), u.ConfirmationToken, models.ConfirmationToken))
+
+	w := ts.do(http.MethodPost, "http://localhost/verify", "", map[string]interface{}{
+		"type":  "signup",
+		"token": rawToken,
+		"email": email,
+	})
+	require.Equal(ts.T(), http.StatusOK, w.Code)
+
+	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
+	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
+	ts.requireAuditSessionID(models.UserSignedUpAction, sessionID)
+}
+
+// TestRecoveryLogin covers login emitted when an already-confirmed user verifies
+// a recovery/magic-link token via /verify and a session is issued.
+func (ts *AuditSessionTestSuite) TestRecoveryLogin() {
+	email := "recovery-login@example.com"
+	const rawToken = "112233"
+	u, err := models.NewUser("", email, "password", ts.Config.JWT.Aud, nil)
+	require.NoError(ts.T(), err)
+	now := time.Now()
+	u.EmailConfirmedAt = &now
+	u.RecoveryToken = crypto.GenerateTokenHash(email, rawToken)
+	u.RecoverySentAt = &now
+	require.NoError(ts.T(), ts.API.db.Create(u))
+	require.NoError(ts.T(), models.CreateOneTimeToken(ts.API.db, u.ID, u.GetEmail(), u.RecoveryToken, models.RecoveryToken))
+
+	w := ts.do(http.MethodPost, "http://localhost/verify", "", map[string]interface{}{
+		"type":  "recovery",
+		"token": rawToken,
+		"email": email,
+	})
+	require.Equal(ts.T(), http.StatusOK, w.Code)
+
+	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
+	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
 	ts.requireAuditSessionID(models.LoginAction, sessionID)
 }
 

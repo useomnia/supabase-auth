@@ -128,6 +128,7 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 		token       *AccessTokenResponse
 		authCode    string
 		rurl        string
+		pending     *deferredAudit
 	)
 
 	grantParams.FillGrantParams(r)
@@ -150,9 +151,9 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 		}
 		switch params.Type {
 		case mail.SignupVerification, mail.InviteVerification:
-			user, terr = a.signupVerify(r, ctx, tx, user)
+			user, pending, terr = a.signupVerify(r, ctx, tx, user)
 		case mail.RecoveryVerification, mail.MagicLinkVerification:
-			user, terr = a.recoverVerify(r, tx, user)
+			user, pending, terr = a.recoverVerify(r, tx, user)
 		case mail.EmailChangeVerification:
 			user, terr = a.emailChangeVerify(r, tx, params, user)
 			if user == nil && terr == nil {
@@ -192,6 +193,13 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 				return apierrors.NewBadRequestError(apierrors.ErrorCodeFlowStateNotFound, "No associated flow state found. %s", terr)
 			}
 		}
+
+		// Written after issuance so signup/login entries carry the session_id
+		// (in the PKCE flow token is nil and the session is created later during
+		// the token exchange, so the entry is written without one).
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
+			return terr
+		}
 		return nil
 	})
 
@@ -226,6 +234,30 @@ func (a *API) verifyGet(w http.ResponseWriter, r *http.Request, params *VerifyPa
 	return nil
 }
 
+// deferredAudit is an audit log entry that a verify helper wants recorded, but
+// which should be written by the caller *after* the session is issued so it can
+// carry the resulting session_id. It is only used for events whose actor
+// (email/phone) is not mutated between the helper and issuance — signup and
+// login — so the recorded actor is identical to writing it inline.
+type deferredAudit struct {
+	action models.AuditAction
+	traits map[string]interface{}
+}
+
+// writeDeferredAudit records a deferred audit entry, tagging it with the
+// issued session when one is available (token may be nil for the PKCE verify
+// flow, where the session is created later during the token exchange).
+func (a *API) writeDeferredAudit(r *http.Request, tx *storage.Connection, user *models.User, pending *deferredAudit, token *AccessTokenResponse) error {
+	if pending == nil {
+		return nil
+	}
+	var opts []models.AuditLogEntryOption
+	if token != nil {
+		opts = append(opts, models.WithSessionID(&token.SessionID))
+	}
+	return models.NewAuditLogEntry(a.config.AuditLog, r, tx, user, pending.action, "", pending.traits, opts...)
+}
+
 func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyParams) error {
 	ctx := r.Context()
 	db := a.db.WithContext(ctx)
@@ -234,6 +266,7 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 		user        *models.User
 		grantParams models.GrantParams
 		token       *AccessTokenResponse
+		pending     *deferredAudit
 	)
 	var isSingleConfirmationResponse = false
 
@@ -254,9 +287,9 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 
 		switch params.Type {
 		case mail.SignupVerification, mail.InviteVerification:
-			user, terr = a.signupVerify(r, ctx, tx, user)
+			user, pending, terr = a.signupVerify(r, ctx, tx, user)
 		case mail.RecoveryVerification, mail.MagicLinkVerification:
-			user, terr = a.recoverVerify(r, tx, user)
+			user, pending, terr = a.recoverVerify(r, tx, user)
 		case mail.EmailChangeVerification:
 			user, terr = a.emailChangeVerify(r, tx, params, user)
 			if user == nil && terr == nil {
@@ -264,7 +297,7 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 				return nil
 			}
 		case smsVerification, phoneChangeVerification:
-			user, terr = a.smsVerify(r, tx, user, params)
+			user, pending, terr = a.smsVerify(r, tx, user, params)
 		default:
 			return apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Unsupported verification type")
 		}
@@ -284,6 +317,11 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 		}
 		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.OTP, grantParams)
 		if terr != nil {
+			return terr
+		}
+
+		// Written after issuance so signup/login entries carry the session_id.
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
 			return terr
 		}
 		return nil
@@ -310,7 +348,7 @@ func (a *API) verifyPost(w http.ResponseWriter, r *http.Request, params *VerifyP
 	return sendJSON(w, http.StatusOK, token)
 }
 
-func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.Connection, user *models.User) (*models.User, error) {
+func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.Connection, user *models.User) (*models.User, *deferredAudit, error) {
 	config := a.config
 
 	shouldUpdatePassword := false
@@ -324,7 +362,7 @@ func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.C
 		}
 
 		if err := user.SetPassword(ctx, password, config.Security.DBEncryption.Encrypt, config.Security.DBEncryption.EncryptionKeyID, config.Security.DBEncryption.EncryptionKey); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		shouldUpdatePassword = true
 	}
@@ -335,12 +373,6 @@ func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.C
 			if terr = user.UpdatePassword(tx, nil); terr != nil {
 				return apierrors.NewInternalServerError("Error storing password").WithInternalError(terr)
 			}
-		}
-
-		if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-			"provider": EmailProvider,
-		}); terr != nil {
-			return terr
 		}
 
 		if terr = user.Confirm(tx); terr != nil {
@@ -362,13 +394,16 @@ func (a *API) signupVerify(r *http.Request, ctx context.Context, conn *storage.C
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return user, nil
+	return user, &deferredAudit{
+		action: models.UserSignedUpAction,
+		traits: map[string]interface{}{"provider": EmailProvider},
+	}, nil
 }
 
-func (a *API) recoverVerify(r *http.Request, conn *storage.Connection, user *models.User) (*models.User, error) {
-	config := a.config
+func (a *API) recoverVerify(r *http.Request, conn *storage.Connection, user *models.User) (*models.User, *deferredAudit, error) {
+	var pending *deferredAudit
 
 	err := conn.Transaction(func(tx *storage.Connection) error {
 		var terr error
@@ -376,41 +411,38 @@ func (a *API) recoverVerify(r *http.Request, conn *storage.Connection, user *mod
 			return terr
 		}
 		if !user.IsConfirmed() {
-			if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-				"provider": EmailProvider,
-			}); terr != nil {
-				return terr
+			pending = &deferredAudit{
+				action: models.UserSignedUpAction,
+				traits: map[string]interface{}{"provider": EmailProvider},
 			}
 
 			if terr = user.Confirm(tx); terr != nil {
 				return terr
 			}
 		} else {
-			if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", nil); terr != nil {
-				return terr
-			}
+			pending = &deferredAudit{action: models.LoginAction}
 		}
 		return nil
 	})
 
 	if err != nil {
-		return nil, apierrors.NewInternalServerError("Database error updating user").WithInternalError(err)
+		return nil, nil, apierrors.NewInternalServerError("Database error updating user").WithInternalError(err)
 	}
-	return user, nil
+	return user, pending, nil
 }
 
-func (a *API) smsVerify(r *http.Request, conn *storage.Connection, user *models.User, params *VerifyParams) (*models.User, error) {
+func (a *API) smsVerify(r *http.Request, conn *storage.Connection, user *models.User, params *VerifyParams) (*models.User, *deferredAudit, error) {
 	config := a.config
 
 	oldPhone := user.GetPhone()
 	phoneIdentityWasCreated := false
+	var pending *deferredAudit
 	err := conn.Transaction(func(tx *storage.Connection) error {
 
 		if params.Type == smsVerification {
-			if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-				"provider": PhoneProvider,
-			}); terr != nil {
-				return terr
+			pending = &deferredAudit{
+				action: models.UserSignedUpAction,
+				traits: map[string]interface{}{"provider": PhoneProvider},
 			}
 			if terr := user.ConfirmPhone(tx); terr != nil {
 				return apierrors.NewInternalServerError("Error confirming user").WithInternalError(terr)
@@ -458,7 +490,7 @@ func (a *API) smsVerify(r *http.Request, conn *storage.Connection, user *models.
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Send phone changed notification email if enabled and phone was changed
@@ -477,7 +509,7 @@ func (a *API) smsVerify(r *http.Request, conn *storage.Connection, user *models.
 		}
 	}
 
-	return user, nil
+	return user, pending, nil
 }
 
 func (a *API) prepErrorRedirectURL(err *HTTPError, r *http.Request, rurl string, flowType models.FlowType) (string, error) {
