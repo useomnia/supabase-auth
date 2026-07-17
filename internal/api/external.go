@@ -204,6 +204,7 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 	var createdUser bool
 	var user *models.User
 	var token *AccessTokenResponse
+	var pending *deferredAudit
 	err = db.Transaction(func(tx *storage.Connection) error {
 		var terr error
 		if targetUser != nil {
@@ -211,12 +212,12 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 				return terr
 			}
 		} else if inviteToken != "" {
-			if user, terr = a.processInvite(r, tx, userData, inviteToken, providerType); terr != nil {
+			if user, pending, terr = a.processInvite(r, tx, userData, inviteToken, providerType); terr != nil {
 				return terr
 			}
 		} else {
 			createdUser = true
-			if _, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
+			if _, user, pending, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional); terr != nil {
 				return terr
 			}
 		}
@@ -245,6 +246,13 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 		}
 
 		if terr != nil {
+			return apierrors.NewOAuthError("server_error", terr.Error())
+		}
+
+		// Written after issuance so signup/login/invite entries carry the
+		// session_id. In the PKCE flow token is nil (the session is created
+		// later during the token exchange), so it is written without one.
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
 			return apierrors.NewOAuthError("server_error", terr.Error())
 		}
 		return nil
@@ -289,13 +297,14 @@ func (a *API) internalExternalProviderCallback(w http.ResponseWriter, r *http.Re
 	return nil
 }
 
-func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.Request, userData *provider.UserProvidedData, providerType string, emailOptional bool) (models.AccountLinkingDecision, *models.User, error) {
+func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.Request, userData *provider.UserProvidedData, providerType string, emailOptional bool) (models.AccountLinkingDecision, *models.User, *deferredAudit, error) {
 	ctx := r.Context()
 	aud := a.requestAud(ctx, r)
 	config := a.config
 
 	var user *models.User
 	var identity *models.Identity
+	var pending *deferredAudit
 	var identityData map[string]interface{}
 	if userData.Metadata != nil {
 		identityData = structs.Map(userData.Metadata)
@@ -303,7 +312,7 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 
 	decision, terr := models.DetermineAccountLinking(tx, config, userData.Emails, aud, providerType, userData.Metadata.Subject)
 	if terr != nil {
-		return 0, nil, terr
+		return 0, nil, nil, terr
 	}
 
 	switch decision.Decision {
@@ -311,20 +320,20 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 		user = decision.User
 
 		if identity, terr = a.createNewIdentity(tx, user, providerType, identityData); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 		if terr = user.UpdateUserMetaData(tx, identityData); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 		if terr = user.UpdateAppMetaDataProviders(tx); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 	case models.CreateAccount:
 		if config.DisableSignup {
-			return 0, nil, apierrors.NewUnprocessableEntityError(apierrors.ErrorCodeSignupDisabled, "Signups not allowed for this instance")
+			return 0, nil, nil, apierrors.NewUnprocessableEntityError(apierrors.ErrorCodeSignupDisabled, "Signups not allowed for this instance")
 		}
 
 		params := &SignupParams{
@@ -351,15 +360,15 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 		// transaction
 		user, terr = params.ToUserModel(isSSOUser)
 		if terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 		if user, terr = a.signupNewUser(tx, user); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 		if identity, terr = a.createNewIdentity(tx, user, providerType, identityData); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 		user.Identities = append(user.Identities, *identity)
 
@@ -369,24 +378,24 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 
 		identity.IdentityData = identityData
 		if terr = tx.UpdateOnly(identity, "identity_data", "last_sign_in_at"); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 		if terr = user.UpdateUserMetaData(tx, identityData); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 		if terr = user.UpdateAppMetaDataProviders(tx); terr != nil {
-			return 0, nil, terr
+			return 0, nil, nil, terr
 		}
 
 	case models.MultipleAccounts:
-		return 0, nil, apierrors.NewInternalServerError("Multiple accounts with the same email address in the same linking domain detected: %v", decision.LinkingDomain)
+		return 0, nil, nil, apierrors.NewInternalServerError("Multiple accounts with the same email address in the same linking domain detected: %v", decision.LinkingDomain)
 
 	default:
-		return 0, nil, apierrors.NewInternalServerError("Unknown automatic linking decision: %v", decision.Decision)
+		return 0, nil, nil, apierrors.NewInternalServerError("Unknown automatic linking decision: %v", decision.Decision)
 	}
 
 	if user.IsBanned() {
-		return 0, nil, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
+		return 0, nil, nil, apierrors.NewForbiddenError(apierrors.ErrorCodeUserBanned, "User is banned")
 	}
 
 	hasEmails := providerType != "web3" && !(emailOptional && decision.CandidateEmail.Email == "")
@@ -397,23 +406,24 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 		// need to be removed when a new oauth identity is being added
 		// to prevent pre-account takeover attacks from happening.
 		if terr = user.RemoveUnconfirmedIdentities(tx, identity); terr != nil {
-			return 0, nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(terr)
+			return 0, nil, nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(terr)
 		}
 		if decision.CandidateEmail.Verified || config.Mailer.Autoconfirm {
-			if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-				"provider": providerType,
-			}); terr != nil {
-				return 0, nil, terr
+			// Recorded by the caller after the session is issued so it carries
+			// the session_id.
+			pending = &deferredAudit{
+				action: models.UserSignedUpAction,
+				traits: map[string]interface{}{"provider": providerType},
 			}
 			// fall through to auto-confirm and issue token
 			if terr = user.Confirm(tx); terr != nil {
-				return 0, nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(terr)
+				return 0, nil, nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(terr)
 			}
 		} else {
 			emailConfirmationSent := false
 			if decision.CandidateEmail.Email != "" {
 				if terr = a.sendConfirmation(r, tx, user, models.ImplicitFlow); terr != nil {
-					return 0, nil, terr
+					return 0, nil, nil, terr
 				}
 				emailConfirmationSent = true
 			}
@@ -425,36 +435,35 @@ func (a *API) createAccountFromExternalIdentity(tx *storage.Connection, r *http.
 						"Unverified email with %v. A confirmation email has been sent to your %v email",
 						providerType, providerType,
 					)
-					return 0, nil, storage.NewCommitWithError(err)
+					return 0, nil, nil, storage.NewCommitWithError(err)
 				}
 
 				err := apierrors.NewUnprocessableEntityError(
 					apierrors.ErrorCodeProviderEmailNeedsVerification,
 					"Unverified email with %v. Verify the email with %v in order to sign in",
 					providerType, providerType)
-				return 0, nil, storage.NewCommitWithError(err)
+				return 0, nil, nil, storage.NewCommitWithError(err)
 			}
 		}
 	} else {
-		if terr := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.LoginAction, "", map[string]interface{}{
-			"provider": providerType,
-		}); terr != nil {
-			return 0, nil, terr
+		// Recorded by the caller after the session is issued so it carries the
+		// session_id.
+		pending = &deferredAudit{
+			action: models.LoginAction,
+			traits: map[string]interface{}{"provider": providerType},
 		}
 	}
 
-	return decision.Decision, user, nil
+	return decision.Decision, user, pending, nil
 }
 
-func (a *API) processInvite(r *http.Request, tx *storage.Connection, userData *provider.UserProvidedData, inviteToken, providerType string) (*models.User, error) {
-	config := a.config
-
+func (a *API) processInvite(r *http.Request, tx *storage.Connection, userData *provider.UserProvidedData, inviteToken, providerType string) (*models.User, *deferredAudit, error) {
 	user, err := models.FindUserByConfirmationToken(tx, inviteToken)
 	if err != nil {
 		if models.IsNotFoundError(err) {
-			return nil, apierrors.NewNotFoundError(apierrors.ErrorCodeInviteNotFound, "Invite not found")
+			return nil, nil, apierrors.NewNotFoundError(apierrors.ErrorCodeInviteNotFound, "Invite not found")
 		}
-		return nil, apierrors.NewInternalServerError("Database error finding user").WithInternalError(err)
+		return nil, nil, apierrors.NewInternalServerError("Database error finding user").WithInternalError(err)
 	}
 
 	var emailData *provider.Email
@@ -468,7 +477,7 @@ func (a *API) processInvite(r *http.Request, tx *storage.Connection, userData *p
 	}
 
 	if emailData == nil {
-		return nil, apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Invited email does not match emails from external provider").WithInternalMessage("invited=%s external=%s", user.Email, strings.Join(emails, ", "))
+		return nil, nil, apierrors.NewBadRequestError(apierrors.ErrorCodeValidationFailed, "Invited email does not match emails from external provider").WithInternalMessage("invited=%s external=%s", user.Email, strings.Join(emails, ", "))
 	}
 
 	var identityData map[string]interface{}
@@ -477,24 +486,18 @@ func (a *API) processInvite(r *http.Request, tx *storage.Connection, userData *p
 	}
 	identity, err := a.createNewIdentity(tx, user, providerType, identityData)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := user.UpdateAppMetaData(tx, map[string]interface{}{
 		"provider": providerType,
 	}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := user.UpdateAppMetaDataProviders(tx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := user.UpdateUserMetaData(tx, identityData); err != nil {
-		return nil, apierrors.NewInternalServerError("Database error updating user").WithInternalError(err)
-	}
-
-	if err := models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.InviteAcceptedAction, "", map[string]interface{}{
-		"provider": providerType,
-	}); err != nil {
-		return nil, err
+		return nil, nil, apierrors.NewInternalServerError("Database error updating user").WithInternalError(err)
 	}
 
 	// an account with a previously unconfirmed email + password
@@ -504,14 +507,21 @@ func (a *API) processInvite(r *http.Request, tx *storage.Connection, userData *p
 	// potentially malicious door exists into their account; thus
 	// the password and phone needs to be removed.
 	if err := user.RemoveUnconfirmedIdentities(tx, identity); err != nil {
-		return nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(err)
+		return nil, nil, apierrors.NewInternalServerError("Error updating user").WithInternalError(err)
 	}
 
 	// confirm because they were able to respond to invite email
 	if err := user.Confirm(tx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return user, nil
+
+	// Recorded by the caller after the session is issued so it carries the
+	// session_id.
+	pending := &deferredAudit{
+		action: models.InviteAcceptedAction,
+		traits: map[string]interface{}{"provider": providerType},
+	}
+	return user, pending, nil
 }
 
 func (a *API) loadExternalState(ctx context.Context, r *http.Request, db *storage.Connection) (context.Context, error) {

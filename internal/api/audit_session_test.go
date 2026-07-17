@@ -11,6 +11,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"github.com/supabase/auth/internal/api/provider"
 	"github.com/supabase/auth/internal/conf"
 	"github.com/supabase/auth/internal/crypto"
 	"github.com/supabase/auth/internal/models"
@@ -213,6 +214,26 @@ func (ts *AuditSessionTestSuite) TestRecoveryLogin() {
 	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
 	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
 	ts.requireAuditSessionID(models.LoginAction, sessionID)
+}
+
+// TestExternalSignupDeferredAudit verifies that the shared social/SSO account
+// helper reports a user_signedup audit intent for a new, email-verified
+// external account. The caller then writes it with the issued session_id (the
+// writeDeferredAudit path exercised end-to-end by the /verify tests above).
+func (ts *AuditSessionTestSuite) TestExternalSignupDeferredAudit() {
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/callback", nil)
+	userData := &provider.UserProvidedData{
+		Metadata: &provider.Claims{Subject: "external-subject-1"},
+		Emails:   []provider.Email{{Email: "ext-signup@example.com", Verified: true, Primary: true}},
+	}
+
+	decision, user, pending, err := ts.API.createAccountFromExternalIdentity(ts.API.db, req, userData, "google", false)
+	require.NoError(ts.T(), err)
+	require.Equal(ts.T(), models.CreateAccount, decision)
+	require.NotNil(ts.T(), user)
+	require.NotNil(ts.T(), pending, "expected a deferred audit intent")
+	require.Equal(ts.T(), models.UserSignedUpAction, pending.action)
+	require.Equal(ts.T(), "google", pending.traits["provider"])
 }
 
 // TestTokenRefreshAndRevoke covers the two events that don't source the session

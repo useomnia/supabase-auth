@@ -333,10 +333,11 @@ func (a *API) IdTokenGrant(ctx context.Context, w http.ResponseWriter, r *http.R
 		var terr error
 
 		var decision models.AccountLinkingDecision
+		var pending *deferredAudit
 		if params.LinkIdentity {
 			user, terr = a.linkIdentityToUser(r, ctx, tx, userData, providerType)
 		} else {
-			decision, user, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional)
+			decision, user, pending, terr = a.createAccountFromExternalIdentity(tx, r, userData, providerType, emailOptional)
 		}
 		createdUser = decision == models.CreateAccount
 		if terr != nil {
@@ -348,6 +349,9 @@ func (a *API) IdTokenGrant(ctx context.Context, w http.ResponseWriter, r *http.R
 			return terr
 		}
 
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
+			return terr
+		}
 		return nil
 	}); err != nil {
 		switch err.(type) {

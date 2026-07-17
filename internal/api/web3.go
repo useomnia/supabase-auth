@@ -148,7 +148,8 @@ func (a *API) web3GrantSolana(ctx context.Context, w http.ResponseWriter, r *htt
 	err = db.Transaction(func(tx *storage.Connection) error {
 		var terr error
 		var decision models.AccountLinkingDecision
-		decision, user, terr = a.createAccountFromExternalIdentity(tx, r, &userData, providerType, true)
+		var pending *deferredAudit
+		decision, user, pending, terr = a.createAccountFromExternalIdentity(tx, r, &userData, providerType, true)
 		if terr != nil {
 			return terr
 		}
@@ -156,6 +157,10 @@ func (a *API) web3GrantSolana(ctx context.Context, w http.ResponseWriter, r *htt
 
 		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
 		if terr != nil {
+			return terr
+		}
+
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
 			return terr
 		}
 
@@ -294,7 +299,8 @@ func (a *API) web3GrantEthereum(ctx context.Context, w http.ResponseWriter, r *h
 	err = db.Transaction(func(tx *storage.Connection) error {
 		var terr error
 		var decision models.AccountLinkingDecision
-		decision, user, terr = a.createAccountFromExternalIdentity(tx, r, &userData, providerType, true)
+		var pending *deferredAudit
+		decision, user, pending, terr = a.createAccountFromExternalIdentity(tx, r, &userData, providerType, true)
 		if terr != nil {
 			return terr
 		}
@@ -302,6 +308,10 @@ func (a *API) web3GrantEthereum(ctx context.Context, w http.ResponseWriter, r *h
 
 		token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.Web3, grantParams)
 		if terr != nil {
+			return terr
+		}
+
+		if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
 			return terr
 		}
 
