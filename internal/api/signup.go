@@ -176,6 +176,10 @@ func (a *API) Signup(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	var signupUser *models.User
+	// For the autoconfirm path a session is issued in a second transaction
+	// below; the user_signedup entry is deferred to there so it carries the
+	// session_id.
+	var pending *deferredAudit
 	if user == nil {
 		// always call this outside of a database transaction as this method
 		// can be computationally hard and block due to password hashing
@@ -227,10 +231,9 @@ func (a *API) Signup(w http.ResponseWriter, r *http.Request) error {
 
 		if params.Provider == "email" && !user.IsConfirmed() {
 			if config.Mailer.Autoconfirm {
-				if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-					"provider": params.Provider,
-				}); terr != nil {
-					return terr
+				pending = &deferredAudit{
+					action: models.UserSignedUpAction,
+					traits: map[string]interface{}{"provider": params.Provider},
 				}
 				if terr = user.Confirm(tx); terr != nil {
 					return apierrors.NewInternalServerError("Database error updating user").WithInternalError(terr)
@@ -253,11 +256,9 @@ func (a *API) Signup(w http.ResponseWriter, r *http.Request) error {
 			}
 		} else if params.Provider == "phone" && !user.IsPhoneConfirmed() {
 			if config.Sms.Autoconfirm {
-				if terr = models.NewAuditLogEntry(config.AuditLog, r, tx, user, models.UserSignedUpAction, "", map[string]interface{}{
-					"provider": params.Provider,
-					"channel":  params.Channel,
-				}); terr != nil {
-					return terr
+				pending = &deferredAudit{
+					action: models.UserSignedUpAction,
+					traits: map[string]interface{}{"provider": params.Provider, "channel": params.Channel},
 				}
 				if terr = user.ConfirmPhone(tx); terr != nil {
 					return apierrors.NewInternalServerError("Database error updating user").WithInternalError(terr)
@@ -309,6 +310,12 @@ func (a *API) Signup(w http.ResponseWriter, r *http.Request) error {
 			var terr error
 			token, terr = a.issueRefreshToken(r, w.Header(), tx, user, models.PasswordGrant, grantParams)
 			if terr != nil {
+				return terr
+			}
+
+			// Deferred user_signedup from the signup transaction, written here so
+			// it carries the session_id of the session just issued.
+			if terr := a.writeDeferredAudit(r, tx, user, pending, token); terr != nil {
 				return terr
 			}
 

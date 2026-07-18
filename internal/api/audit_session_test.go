@@ -160,6 +160,25 @@ func (ts *AuditSessionTestSuite) TestLoginPassword() {
 	ts.requireAuditSessionID(models.LoginAction, sessionID)
 }
 
+// TestSignupAutoconfirm covers user_signedup on the direct signup path when
+// autoconfirm is enabled: the account is created and a session issued in the
+// same request, and the deferred user_signedup entry carries that session_id.
+func (ts *AuditSessionTestSuite) TestSignupAutoconfirm() {
+	prevAutoconfirm := ts.Config.Mailer.Autoconfirm
+	ts.Config.Mailer.Autoconfirm = true
+	defer func() { ts.Config.Mailer.Autoconfirm = prevAutoconfirm }()
+
+	w := ts.do(http.MethodPost, "http://localhost/signup", "", map[string]interface{}{
+		"email":    "signup-autoconfirm@example.com",
+		"password": "password123",
+	})
+	require.Equal(ts.T(), http.StatusOK, w.Code)
+
+	sessionID, err := uuid.FromString(w.Header().Get("sb-auth-session-id"))
+	require.NoError(ts.T(), err, "expected a sb-auth-session-id response header")
+	ts.requireAuditSessionID(models.UserSignedUpAction, sessionID)
+}
+
 // TestSignupVerify covers user_signedup emitted when a signup is confirmed via
 // /verify and a session is issued in the same request (the deferred-audit path).
 func (ts *AuditSessionTestSuite) TestSignupVerify() {
